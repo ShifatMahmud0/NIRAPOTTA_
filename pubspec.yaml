@@ -1,0 +1,55 @@
+name: gps_sms
+description: A Flutter app that detects shakes and triggers an emergency alert.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sensors_plus: ^6.1.1
+  audioplayers: ^6.1.0
+  vibration: ^2.0.0
+  cupertino_icons: ^1.0.8
+  noise_meter: ^5.0.0
+  permission_handler: ^11.3.1
+  avatar_glow: ^3.0.1
+  slide_to_act: ^2.0.2
+  google_fonts: ^6.2.1
+  camera: ^0.11.0+2
+  path_provider: ^2.1.4
+  intl: ^0.19.0
+  gal: ^2.3.2
+  shared_preferences: ^2.3.2
+  pinput: ^6.0.2
+  record: ^6.1.1
+  video_player: ^2.9.2
+  geolocator: ^13.0.2
+  provider: ^6.1.2
+  firebase_core: ^3.3.0
+  firebase_auth: ^5.1.4
+  google_sign_in: ^6.2.1
+  cloud_firestore: ^5.2.1
+  firebase_messaging: ^15.0.3
+  share_plus: ^10.1.0
+  url_launcher: ^6.3.0
+  flutter_local_notifications: ^17.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/alert_sound.mp3
+    - assets/app_icon.png
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/app_icon.png"
