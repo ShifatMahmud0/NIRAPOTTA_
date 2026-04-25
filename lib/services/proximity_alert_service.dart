@@ -67,7 +67,7 @@ class ProximityAlertService extends ChangeNotifier {
   Position? _currentPosition;
   List<NearbyUser> _nearbyUsers = [];
   bool _isTracking = false;
-  double _alertRadius = 50.0;
+  double _alertRadius = 8.0;
   List<EmergencyContact> _emergencyContacts = [];
   DateTime? _lastAlertCheck;
 
@@ -432,7 +432,6 @@ class ProximityAlertService extends ChangeNotifier {
     _isTracking = true;
     notifyListeners();
 
-    // Fix: Removed 'const' because AndroidSettings and ForegroundNotificationConfig are not const
     final LocationSettings locationSettings = AndroidSettings(
         accuracy: LocationAccuracy.high,
         distanceFilter: 10,
@@ -479,12 +478,28 @@ class ProximityAlertService extends ChangeNotifier {
       if (_currentPosition == null) return;
 
       final nearby = <NearbyUser>[];
+      final now = DateTime.now();
+
       for (final doc in snapshot.docs) {
         if (doc.id == _userId) continue;
 
         final data = doc.data();
         final lat = data['latitude'] as double?;
         final lng = data['longitude'] as double?;
+        final token = data['fcmToken'] as String?;
+        final lastSeen = data['lastSeen'] as Timestamp?;
+
+        // 1. Must have a valid FCM token to be "Active"
+        if (token == null || token.isEmpty) continue;
+
+        // 2. Must have updated location in the last 10 minutes (prevents ghost users)
+        if (lastSeen != null) {
+          final difference = now.difference(lastSeen.toDate());
+          if (difference.inMinutes > 10) continue;
+        } else {
+          // If they never updated location, they aren't active
+          continue;
+        }
 
         if (lat != null && lng != null) {
           final dist = Geolocator.distanceBetween(
@@ -565,7 +580,7 @@ class ProximityAlertService extends ChangeNotifier {
           content: Text(
             !status.isGranted 
                 ? 'SMS Permission is required to send alerts to contacts.'
-                : 'You have no emergency contacts for SMS and no nearby users nearby.',
+                : 'You have no emergency contacts for SMS and no active app users nearby.',
             style: const TextStyle(color: Colors.white70),
           ),
           actions: [
@@ -593,7 +608,7 @@ class ProximityAlertService extends ChangeNotifier {
             const SizedBox(height: 16),
             Text(
               canSendSMS && canSendNotifications
-                  ? 'Sending SMS + Notifications...'
+                  ? 'Sending SMS to ${_emergencyContacts.length} & notifying ${_nearbyUsers.length} user(s)...'
                   : canSendSMS
                       ? 'Sending SMS to '
                           '${_emergencyContacts.length} contact(s)...'
@@ -688,7 +703,7 @@ class ProximityAlertService extends ChangeNotifier {
     if (_nearbyUsers.isEmpty) {
       _showSnack(
         context,
-        'No users within ${_alertRadius.toStringAsFixed(0)}m to notify.',
+        'No active app users within ${_alertRadius.toStringAsFixed(0)}m to notify.',
         Colors.orange,
       );
       return;
@@ -706,7 +721,7 @@ class ProximityAlertService extends ChangeNotifier {
                 color: Colors.orangeAccent),
             const SizedBox(height: 16),
             Text(
-              'Notifying ${_nearbyUsers.length} nearby user(s)...',
+              'Notifying ${_nearbyUsers.length} active user(s)...',
               style: const TextStyle(color: Colors.white),
             ),
           ],
@@ -740,7 +755,7 @@ class ProximityAlertService extends ChangeNotifier {
         Navigator.pop(context);
         _showSnack(
           context,
-          '✅ Alert sent to ${_nearbyUsers.length} nearby user(s)',
+          '✅ Alert sent to ${_nearbyUsers.length} active user(s)',
           Colors.orange,
         );
       }

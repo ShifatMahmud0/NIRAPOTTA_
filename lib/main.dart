@@ -22,19 +22,20 @@ import 'screens/trigger_customization_screen.dart';
 import 'services/proximity_alert_service.dart';
 import 'app_globals.dart';
 import 'notification_service.dart';
+import 'services/brain_service.dart';
 
 // ── FCM Background Handler ─────────────────────────────────────────────────
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
-  // For background alerts, we should trigger a system notification
-  // ProximityAlertService will handle the logic when initialized in background if possible,
-  // but showing a system notification here is more reliable.
+  final notificationService = NotificationService();
+  await notificationService.initialize(); 
+  
   final data = message.data;
   final alertType = data['alertType'] ?? 'unknown';
   final isMajor = alertType == 'major';
   
-  await NotificationService().showIncomingAlertNotification(
+  await notificationService.showIncomingAlertNotification(
     title: isMajor ? '🚨 EMERGENCY ALERT' : '⚠️ Warning Alert',
     body: 'Someone nearby needs help!',
     payload: 'alert_received',
@@ -46,14 +47,10 @@ void main() async {
   
   try {
     await Firebase.initializeApp();
-    
-    // Initialize System Notifications
     await NotificationService().initialize();
-    
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-    
-    // Start initializing services in background
     ProximityAlertService().initialize();
+    await BrainService().initialize();
   } catch (e) {
     debugPrint('Firebase init error: $e');
   }
@@ -100,7 +97,7 @@ class _HomePageState extends State<HomePage> {
   late SoundService _soundService;
 
   bool _isListening = false;
-  bool _isTriggering = false; // Guard to prevent multiple simultaneous alerts
+  bool _isTriggering = false; 
   double _shakeSensitivity = 15.0;
   double _soundSensitivity = 85.0;
 
@@ -109,7 +106,18 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _loadCustomPreferences();
 
-    HardwareButtonService().initialize();
+    HardwareButtonService.platform.setMethodCallHandler((call) async {
+      debugPrint('📞 Hardware Button Event: ${call.method}');
+      if (_isTriggering) return;
+
+      if (call.method == 'power_button_double_click') {
+        _triggerAlert('Panic Button: Double Power Press');
+      } else if (call.method == 'power_button_triple_click') {
+        _triggerAlert('Panic Button: Triple Power Press');
+      } else if (call.method == 'volume_button_triple_click') {
+        _triggerAlert('Panic Button: Triple Volume Press');
+      }
+    });
 
     _gestureService = GestureService(
       onGestureDetected: _onGestureDetected,
@@ -131,44 +139,69 @@ class _HomePageState extends State<HomePage> {
 
         _gestureService.shakeThreshold = _shakeSensitivity;
         _soundService.dbThreshold = _soundSensitivity;
+        
+        BrainService().tuneSensitivity(_shakeSensitivity, _soundSensitivity);
       });
     }
   }
 
   void _onGestureDetected(GestureType type) {
-    if (!mounted || _isTriggering) return;
-
+    debugPrint('📳 Sensor detected gesture: $type (Listening: $_isListening)');
+    if (!mounted || !_isListening || _isTriggering) return;
     String triggerType =
-        type == GestureType.IMPACT ? "IMPACT DETECTED" : "SHAKE DETECTED";
+        type == GestureType.impact ? "IMPACT DETECTED" : "SHAKE DETECTED";
     _triggerAlert(triggerType);
   }
 
   void _onLoudNoiseDetected() {
-    if (!mounted || _isTriggering) return;
+    debugPrint('🎤 Sensor detected LOUD NOISE (Listening: $_isListening)');
+    if (!mounted || !_isListening || _isTriggering) return;
     _triggerAlert("LOUD NOISE DETECTED");
   }
 
   void _triggerAlert(String reason) async {
     if (_isTriggering) return;
     
+    debugPrint('🧠 BRAIN INFERENCE START: $reason');
+    final AlertSeverity severity = await BrainService().analyze();
+    debugPrint('🧠 BRAIN INFERENCE RESULT: $severity');
+    
+    if (severity == AlertSeverity.none) {
+      debugPrint('🧠 Brain: Ignored false alarm.');
+      return; 
+    }
+
     setState(() {
       _isTriggering = true;
-      _isListening = false;
+      _isListening = false; 
     });
 
     _gestureService.stopListening();
     _soundService.stopListening();
+    ProximityAlertService().stopTracking();
 
     SensorDataRepository().lastTriggerReason = reason;
+
+    // Background Buffer Handling
+    Future.delayed(const Duration(seconds: 8), () {
+      final String csvSnapshot = SensorDataRepository().getCSVData();
+      SensorDataRepository().saveSnapshotToFile(csvSnapshot, reason);
+    });
 
     String triggerKey = 'shake';
     if (reason.contains("LOUD NOISE")) {
       triggerKey = 'loud_noise';
+    } else if (reason.contains("Double Power")) {
+      triggerKey = 'double_power';
+    } else if (reason.contains("Triple Power")) {
+      triggerKey = 'triple_power';
+    } else if (reason.contains("Triple Volume")) {
+      triggerKey = 'triple_volume';
     }
+
     EmergencyActionDispatcher.dispatch(triggerKey, reason);
 
-    if (reason.contains("IMPACT") || reason.contains("LOUD NOISE")) {
-      debugPrint("Major Alert Detected: Capturing Evidence...");
+    if (severity == AlertSeverity.major) {
       try {
         await CameraService().takeEvidencePhoto(reason);
       } catch (e) {
@@ -178,20 +211,26 @@ class _HomePageState extends State<HomePage> {
 
     if (!mounted) return;
 
+    // Show the Alert Window with detected severity
     await Navigator.of(context).push(
       MaterialPageRoute(
-          builder: (context) => AlertScreen(triggerReason: reason)),
+          builder: (context) => AlertScreen(
+            triggerReason: reason, 
+            severity: severity,
+          )),
     );
 
     if (mounted) {
       setState(() {
         _isTriggering = false;
+        _isListening = false; 
       });
     }
   }
 
   void _toggleListening() async {
     if (_isListening) {
+      debugPrint('⏹️ Disarming Sentinel...');
       _gestureService.stopListening();
       _soundService.stopListening();
       ProximityAlertService().stopTracking();
@@ -199,6 +238,7 @@ class _HomePageState extends State<HomePage> {
         _isListening = false;
       });
     } else {
+      debugPrint('🚀 Arming Sentinel...');
       _gestureService.startListening();
       await _soundService.startListening();
       ProximityAlertService().startTracking();
@@ -212,6 +252,7 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _shakeSensitivity = value;
       _gestureService.shakeThreshold = _shakeSensitivity;
+      BrainService().tuneSensitivity(_shakeSensitivity, _soundSensitivity);
     });
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('shake_sensitivity', value);
@@ -221,6 +262,7 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _soundSensitivity = value;
       _soundService.dbThreshold = _soundSensitivity;
+      BrainService().tuneSensitivity(_shakeSensitivity, _soundSensitivity);
     });
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('sound_sensitivity', value);

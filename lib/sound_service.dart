@@ -57,18 +57,10 @@ class SoundService {
 
   void _analyzeSound(NoiseReading reading) {
     int now = DateTime.now().millisecondsSinceEpoch;
-
-    // Ignore sound spikes during the first 1 second of initialization (Warm-up period)
     if (now - _listenStartTime < 1000) return;
 
-    // Log to "Brain Memory"
-    SensorDataRepository().addReading(SensorReading(
-      timestamp: DateTime.now(),
-      x: 0,
-      y: 0,
-      z: 0,
-      dbLevel: reading.maxDecibel,
-    ));
+    // REMOVE the old addReading block, REPLACE with this single line:
+    SensorDataRepository().updateDbLevel(reading.maxDecibel);
 
     if (reading.maxDecibel > dbThreshold) {
       int now = DateTime.now().millisecondsSinceEpoch;

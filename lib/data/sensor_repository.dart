@@ -61,6 +61,12 @@ class SensorDataRepository {
     return _buffer.toList();
   }
 
+  /// Called by SoundService to update the latest dB reading.
+  /// The next accelerometer reading will automatically carry this value
+  /// forward via ZOH — no separate row is added to the buffer.
+  void updateDbLevel(double db) {
+    _lastDb = db;
+  }
   /// Clears memory (e.g., after processing an alert).
   void clear() {
     _buffer.clear();
@@ -103,6 +109,30 @@ class SensorDataRepository {
       return file.path;
     } catch (e) {
       debugPrint("Error saving logs: $e");
+      return null;
+    }
+  }
+  /// Saves a pre-captured CSV snapshot string to file.
+  /// Use this when you need to preserve data taken at a specific moment,
+  /// even if the live buffer gets cleared afterward (e.g. alert dismissed).
+  /// Saves a pre-captured CSV string to file (safe even if buffer is cleared)
+  Future<String?> saveSnapshotToFile(String csvData, String reason) async {
+    try {
+      final directory = Directory('/storage/emulated/0/Download');
+      if (!await directory.exists()) {
+        await directory.create(recursive: true);
+      }
+      final String timestamp =
+      DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final String safeReason =
+      reason.replaceAll(' ', '_').toUpperCase();
+      final String fileName = 'sensor_logs_${safeReason}_$timestamp.csv';
+      final File file = File('${directory.path}/$fileName');
+      await file.writeAsString(csvData);
+      debugPrint('Snapshot saved to: ${file.path}');
+      return file.path;
+    } catch (e) {
+      debugPrint('Error saving snapshot: $e');
       return null;
     }
   }

@@ -48,6 +48,7 @@ flutter:
   assets:
     - assets/alert_sound.mp3
     - assets/app_icon.png
+    - assets/ml/
 
 flutter_launcher_icons:
   android: "launcher_icon"

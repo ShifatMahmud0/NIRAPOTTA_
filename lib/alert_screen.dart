@@ -4,13 +4,16 @@ import 'package:vibration/vibration.dart';
 import 'package:slide_to_act/slide_to_act.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'services/proximity_alert_service.dart';
+import 'services/brain_service.dart';
 
 class AlertScreen extends StatefulWidget {
-  final String triggerReason; // Added parameter
+  final String triggerReason; 
+  final AlertSeverity severity; // New: Detect if major or minor
 
   const AlertScreen({
     super.key,
-    this.triggerReason = "EMERGENCY DETECTED", // Default value
+    required this.triggerReason,
+    required this.severity,
   });
 
   @override
@@ -19,43 +22,46 @@ class AlertScreen extends StatefulWidget {
 
 class _AlertScreenState extends State<AlertScreen> {
   final AudioPlayer _audioPlayer = AudioPlayer();
-  bool _isPlaying = false;
-
   bool _isStopping = false;
 
   @override
   void initState() {
     super.initState();
     _startAlarm();
+    
+    // ── AUTOMATIC BACKEND ACTION ──
+    // Immediately perform the SOS logic based on what the Brain detected
+    _performAutomaticSOS();
   }
 
   Future<void> _startAlarm() async {
-    // Check if we are already stopping before starting anything
     if (_isStopping || !mounted) return;
-
-    // Play loud alert sound
     try {
       await _audioPlayer.setReleaseMode(ReleaseMode.loop);
-      if (_isStopping || !mounted) return; // Re-check
       await _audioPlayer.setSource(AssetSource('alert_sound.mp3'));
-      if (_isStopping || !mounted) return; // Re-check
       await _audioPlayer.resume();
-      setState(() {
-        _isPlaying = true;
-      });
     } catch (e) {
       debugPrint('Error playing sound: $e');
     }
-    // NOTE: Vibration intentionally removed here.
-    // Vibration is triggered by ProximityAlertService when a notification
-    // arrives FROM ANOTHER USER — not when the sensor-triggered alert screen opens.
+  }
+
+  void _performAutomaticSOS() {
+    // We wrap this in a microtask so the UI shows first
+    Future.microtask(() {
+      if (widget.severity == AlertSeverity.major) {
+        debugPrint('🚀 AlertScreen: Executing Automatic MAJOR SOS...');
+        ProximityAlertService().sendMajorAlert(context);
+      } else if (widget.severity == AlertSeverity.minor) {
+        debugPrint('🚀 AlertScreen: Executing Automatic MINOR Notification...');
+        ProximityAlertService().sendMinorAlert(context);
+      }
+    });
   }
 
   Future<void> _stopAlarm() async {
-    _isStopping = true; // Set flag immediately
+    _isStopping = true; 
     await _audioPlayer.stop();
     await Vibration.cancel();
-    debugPrint('Alarm stopped');
     if (mounted) {
       Navigator.of(context).pop();
     }
@@ -70,149 +76,88 @@ class _AlertScreenState extends State<AlertScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final bool isMajor = widget.severity == AlertSeverity.major;
+
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [
-              Color(0xFF8B0000), // Dark Red
-              Color(0xFF1E1E1E), // Dark Grey
-              Color(0xFF2D1B2E), // Deep muted ruby
-            ],
+            colors: isMajor 
+              ? [const Color(0xFFB71C1C), const Color(0xFF1E1E1E), const Color(0xFF2D1B2E)] // Intense Red
+              : [const Color(0xFFE65100), const Color(0xFF1E1E1E), const Color(0xFF2D1B2E)], // Warning Orange
           ),
         ),
         child: SafeArea(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(
-                Icons.warning_amber_rounded,
-                size: 100,
+              Icon(
+                isMajor ? Icons.report_problem : Icons.warning_amber_rounded,
+                size: 120,
                 color: Colors.white,
               ),
               const SizedBox(height: 20),
-              const Text(
-                'EMERGENCY ALERT!',
-                style: TextStyle(
-                  fontSize: 32,
+              Text(
+                isMajor ? '🚨 MAJOR EMERGENCY 🚨' : '⚠️ MINOR ALERT ⚠️',
+                style: GoogleFonts.outfit(
+                  fontSize: 28,
                   fontWeight: FontWeight.bold,
                   color: Colors.white,
+                  letterSpacing: 1.5
                 ),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 10),
-              // Display dynamic Trigger Reason
-              Text(
-                widget.triggerReason,
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.yellowAccent,
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(30)
                 ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 5),
-              const Text(
-                'Tap below to send an emergency alert:',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.white70,
+                child: Text(
+                  widget.triggerReason,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.yellowAccent,
+                  ),
                 ),
-                textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 30),
-
-              // ── MAJOR ALERT button ──────────────────────────────────────
+              const SizedBox(height: 40),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFD32F2F),
-                    minimumSize: const Size(double.infinity, 64),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    elevation: 8,
-                  ),
-                  icon: const Icon(Icons.warning_amber_rounded,
-                      color: Colors.white, size: 28),
-                  label: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('MAJOR ALERT',
-                          style: GoogleFonts.outfit(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                              letterSpacing: 1.2)),
-                      const Text('SMS to contacts + notify nearby users',
-                          style:
-                              TextStyle(fontSize: 10, color: Colors.white70)),
-                    ],
-                  ),
-                  onPressed: () =>
-                      ProximityAlertService().sendMajorAlert(context),
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: Text(
+                  isMajor 
+                    ? 'SOS Messages sent to contacts and nearby sentinel users.' 
+                    : 'Nearby sentinel users are being notified of your status.',
+                  style: const TextStyle(color: Colors.white70, fontSize: 14),
+                  textAlign: TextAlign.center,
                 ),
               ),
-
-              const SizedBox(height: 16),
-
-              // ── MINOR ALERT button ──────────────────────────────────────
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFE65100),
-                    minimumSize: const Size(double.infinity, 64),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    elevation: 8,
-                  ),
-                  icon: const Icon(Icons.info_outline,
-                      color: Colors.white, size: 28),
-                  label: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('MINOR ALERT',
-                          style: GoogleFonts.outfit(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                              letterSpacing: 1.2)),
-                      const Text('Notify nearby users only',
-                          style:
-                              TextStyle(fontSize: 10, color: Colors.white70)),
-                    ],
-                  ),
-                  onPressed: () =>
-                      ProximityAlertService().sendMinorAlert(context),
-                ),
-              ),
+              
               const Spacer(),
-              // Slide to Stop (Modern Safety Feature)
+              
+              // Slide to Stop (The only interaction allowed)
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
                 child: SlideAction(
                   borderRadius: 30,
                   elevation: 0,
-                  innerColor: Colors.red,
+                  innerColor: isMajor ? Colors.red : Colors.orange,
                   outerColor: Colors.white,
-                  sliderButtonIcon: const Icon(
-                    Icons.arrow_forward_ios_rounded,
-                    color: Colors.white,
-                  ),
+                  sliderButtonIcon: const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white),
                   text: 'SLIDE TO DISABLE',
-                  textStyle: const TextStyle(
-                    color: Colors.red,
+                  textStyle: TextStyle(
+                    color: isMajor ? Colors.red : Colors.orange,
                     fontWeight: FontWeight.bold,
-                    fontSize: 20,
+                    fontSize: 18,
                   ),
                   onSubmit: () async {
                     await _stopAlarm();
-                    return null; // Reset slider? No, we pop.
+                    return null;
                   },
                 ),
               ),
@@ -222,6 +167,4 @@ class _AlertScreenState extends State<AlertScreen> {
       ),
     );
   }
-
 }
-

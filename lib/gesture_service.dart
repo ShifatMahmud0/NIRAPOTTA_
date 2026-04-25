@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'data/sensor_repository.dart';
 import 'data/sensor_reading_model.dart';
 
 enum GestureType {
-  SHAKE,
-  IMPACT,
-  UNKNOWN,
+  shake,
+  impact,
+  unknown,
 }
 
 /// A class that listens to accelerometer events and detects specific gestures.
@@ -38,13 +39,17 @@ class GestureService {
 
   /// Starts listening to accelerometer events.
   void startListening() {
-    // We use UserAccelerometerEvent which excludes gravity to detect shakes better.
-    // For fall detection (impact), sometimes raw AccelerometerEvent is better,
-    // but for "Forceful Push" or "Hard Impact" user accel implies sudden stop.
-    _streamSubscription =
-        userAccelerometerEvents.listen((UserAccelerometerEvent event) {
+    debugPrint('📡 GestureService: Accelerometer stream starting...');
+    _streamSubscription = userAccelerometerEventStream(
+      samplingPeriod: SensorInterval.gameInterval,
+    ).listen((UserAccelerometerEvent event) {
       double magnitude =
           sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
+
+      // Deep debug: Every 1 second, print that we are receiving data
+      if (DateTime.now().millisecondsSinceEpoch % 1000 < 20) {
+        debugPrint('📊 Raw Accel Magnitude: ${magnitude.toStringAsFixed(2)}');
+      }
 
       _analyzeGesture(magnitude);
 
@@ -55,6 +60,8 @@ class GestureService {
         y: event.y,
         z: event.z,
       ));
+    }, onError: (e) {
+      debugPrint('❌ GestureService Error: $e');
     });
   }
 
@@ -63,16 +70,19 @@ class GestureService {
     if (now - _lastGestureTimestamp < _gestureDebounceDuration) return;
 
     if (magnitude > impactThreshold) {
+      debugPrint('⚡ IMPACT threshold crossed! ($magnitude > $impactThreshold)');
       _lastGestureTimestamp = now;
-      onGestureDetected(GestureType.IMPACT);
+      onGestureDetected(GestureType.impact);
     } else if (magnitude > shakeThreshold) {
+      debugPrint('👋 SHAKE threshold crossed! ($magnitude > $shakeThreshold)');
       _lastGestureTimestamp = now;
-      onGestureDetected(GestureType.SHAKE);
+      onGestureDetected(GestureType.shake);
     }
   }
 
   /// Stops listening to accelerometer events.
   void stopListening() {
+    debugPrint('🛑 GestureService: Stopping stream.');
     _streamSubscription?.cancel();
     _streamSubscription = null;
   }

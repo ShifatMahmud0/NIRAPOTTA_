@@ -8,15 +8,24 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.AssetManager
 import android.os.Build
 import android.telephony.SmsManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import org.tensorflow.lite.Interpreter
+import java.io.FileInputStream
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.gps_sms/hardware_buttons"
+    private val BRAIN_CHANNEL = "com.example.gps_sms/brain"
     private var methodChannel: MethodChannel? = null
+    
+    // TFLite Brain Members
+    private var tfliteInterpreter: Interpreter? = null
     
     private var lastPowerClickTime: Long = 0
     private var powerClickCount = 0
@@ -67,11 +76,50 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         
-        // Create Notification Channel for Background Alerts
         createNotificationChannel()
 
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         
+        // Brain Channel implementation
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BRAIN_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "loadModel" -> {
+                    try {
+                        tfliteInterpreter = Interpreter(loadModelFile())
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("LOAD_ERROR", e.message, null)
+                    }
+                }
+                "runInference" -> {
+                    val data = call.argument<List<Double>>("data")
+                    val windowSize = call.argument<Int>("windowSize") ?: 0
+                    val numFeatures = call.argument<Int>("numFeatures") ?: 0
+                    
+                    if (data != null && tfliteInterpreter != null) {
+                        // Reshape input to [1, windowSize, numFeatures] as Float
+                        val input = Array(1) { Array(windowSize) { FloatArray(numFeatures) } }
+                        for (i in 0 until windowSize) {
+                            for (j in 0 until numFeatures) {
+                                input[0][i][j] = data[i * numFeatures + j].toFloat()
+                            }
+                        }
+                        
+                        // Output shape [1, 3]
+                        val output = Array(1) { FloatArray(3) }
+                        tfliteInterpreter?.run(input, output)
+                        
+                        // Convert to List for Flutter
+                        val resultList = output[0].map { it.toDouble() }
+                        result.success(resultList)
+                    } else {
+                        result.error("DATA_ERROR", "Invalid data or model not loaded", null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
         val smsChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.gps_sms/background_sms")
         smsChannel.setMethodCallHandler { call, result ->
             if (call.method == "sendSms") {
@@ -97,6 +145,15 @@ class MainActivity: FlutterActivity() {
         } else {
             registerReceiver(screenReceiver, filter)
         }
+    }
+
+    private fun loadModelFile(): MappedByteBuffer {
+        val fileDescriptor = assets.openFd("flutter_assets/assets/ml/model.tflite")
+        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+        val fileChannel = inputStream.channel
+        val startOffset = fileDescriptor.startOffset
+        val declaredLength = fileDescriptor.length
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
     }
 
     private fun createNotificationChannel() {
