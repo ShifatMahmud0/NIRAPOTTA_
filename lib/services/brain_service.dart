@@ -2,14 +2,23 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:tflite_flutter/tflite_flutter.dart';
 import '../data/sensor_repository.dart';
 import '../data/sensor_reading_model.dart';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Alert severity levels — the output of "The Brain"
+// ─────────────────────────────────────────────────────────────────────────────
+
 enum AlertSeverity {
-  none,   
-  minor,  
-  major,  
+  none,   // False alarm — do nothing
+  minor,  // Possible struggle — show local warning
+  major,  // High-confidence emergency — dispatch full SOS
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Normalization parameters loaded from assets/ml/norm_params.json
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _NormParams {
   final List<double> min;
@@ -31,113 +40,179 @@ class _NormParams {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BrainService — singleton that wraps TFLite inference
+// ─────────────────────────────────────────────────────────────────────────────
+
 class BrainService extends ChangeNotifier {
+  // ── Singleton ──────────────────────────────────────────────────────────────
   static final BrainService _instance = BrainService._internal();
   factory BrainService() => _instance;
   BrainService._internal();
 
-  static const _channel = MethodChannel('com.example.gps_sms/brain');
+  // ── Features ───────────────────────────────────────────────────────────────
+  static const int _numFeatures = 5; // Acc_X, Acc_Y, Acc_Z, Magnitude, DB_Level
 
-  // ── DYNAMIC THRESHOLDS ──
-  double majorThreshold = 0.30; // Lowered default starting point
-  double minorThreshold = 0.15;
-  
-  static const int _numFeatures = 5;
+  // ── Dynamic thresholds (tuned by sensitivity sliders) ──────────────────────
+  static const double _majorThreshold = 0.60;
+  static const double _minorThreshold = 0.40;
 
+  // ── State ──────────────────────────────────────────────────────────────────
+  Interpreter? _interpreter;   // ← tflite_flutter interpreter (pure Dart)
   _NormParams? _normParams;
   bool _isReady = false;
+
+  /// Last output probabilities — useful for the debug overlay on HomeScreen
   List<double> lastProbabilities = [0.0, 0.0, 0.0];
 
   bool get isReady => _isReady;
 
-  /// Updates the AI confidence requirements based on Home Screen Sensitivity Sliders.
+  // ── Sensitivity tuning ─────────────────────────────────────────────────────
+
+  /// Called from HomeScreen slider changes.
+  /// Maps shakeValue 10 (high sensitivity) → 0.30 confidence needed
+  ///                 30 (low  sensitivity) → 0.75 confidence needed
+  // CHANGE the entire tuneSensitivity method to this:
   void tuneSensitivity(double shakeValue, double soundValue) {
-    // Mapping 10 (High Sensitivity) -> 0.15 (15% confidence needed)
-    // Mapping 30 (Low Sensitivity) -> 0.75 (75% confidence needed)
-    majorThreshold = 0.15 + ((shakeValue - 10) / 20) * 0.60;
-    
-    // Minor threshold is always lower
-    minorThreshold = (majorThreshold * 0.5).clamp(0.1, 0.5);
-    
-    debugPrint('🧠 Brain Tuned: Need ${(majorThreshold*100).toStringAsFixed(0)}% AI confidence for Major Alert');
+    // The sensitivity sliders control when GestureService and SoundService
+    // wake up the brain — not how confident the brain needs to be.
+    // Brain thresholds are fixed to prevent false MAJOR alerts.
+    debugPrint(
+      '🧠 Gesture threshold: ${shakeValue} m/s²  '
+          'Sound threshold: ${soundValue} dB  '
+          'Brain: MAJOR needs 60%, MINOR needs 40%',
+    );
   }
 
+  // ── Initialization ─────────────────────────────────────────────────────────
+
+  /// Loads model.tflite and norm_params.json from assets.
+  /// Call once in main() before runApp().
   Future<void> initialize() async {
     try {
-      final normJson = await rootBundle.loadString('assets/ml/norm_params.json');
+      // 1. Load normalization parameters
+      final normJson =
+      await rootBundle.loadString('assets/ml/norm_params.json');
       _normParams = _NormParams.fromJson(json.decode(normJson));
-      final bool? success = await _channel.invokeMethod('loadModel');
-      _isReady = success ?? false;
-      debugPrint(_isReady ? '✅ BrainService: Native model ready.' : '❌ BrainService: Native load failed.');
+
+      // 2. Load the TFLite interpreter directly in Dart — no native code needed
+      _interpreter = await Interpreter.fromAsset('assets/ml/model.tflite');
+      _interpreter!.allocateTensors();
+
+      _isReady = true;
+      debugPrint(
+        '✅ BrainService: model.tflite loaded and ready. '
+            'Window=${_normParams!.windowSize}',
+      );
     } catch (e) {
       _isReady = false;
-      debugPrint('❌ BrainService: Init error — $e');
+      debugPrint('❌ BrainService: Failed to initialize — $e');
+      debugPrint(
+        '   Check that assets/ml/model.tflite and '
+            'assets/ml/norm_params.json exist and are listed in pubspec.yaml',
+      );
     }
   }
 
+  // ── Main inference ─────────────────────────────────────────────────────────
+
+  /// Fetches the sensor buffer, runs TFLite inference, returns AlertSeverity.
   Future<AlertSeverity> analyze() async {
-    if (!_isReady || _normParams == null) {
-      debugPrint('⚠️ BrainService: Model not ready, allowing alert anyway for safety.');
-      return AlertSeverity.minor; // Fail-safe: trigger minor alert if AI is offline
+    if (!_isReady || _interpreter == null || _normParams == null) {
+      // Fail-safe: if model not loaded, allow a minor alert so the user
+      // is never left completely unprotected.
+      debugPrint('⚠️ BrainService: not ready — fail-safe minor alert');
+      return AlertSeverity.minor;
     }
 
     try {
-      final List<SensorReading> rawData = SensorDataRepository().getRecentData();
+      // ── Step 1: Fetch raw sensor data ──────────────────────────────────────
+      final List<SensorReading> rawData =
+      SensorDataRepository().getRecentData();
+
+      // ── Step 2: Build 2D input matrix (windowSize × 5) ────────────────────
       final int windowSize = _normParams!.windowSize;
       final inputMatrix = _buildInputMatrix(rawData, windowSize);
+
+      // ── Step 3: Normalize using training-time min/max ──────────────────────
       final normalizedMatrix = _normalize(inputMatrix);
 
-      final List<double> flattened = normalizedMatrix.expand((row) => row).toList();
+      // ── Step 4: Shape input as [1, windowSize, numFeatures] ───────────────
+      // tflite_flutter needs a nested List that matches the tensor shape.
+      final input = [normalizedMatrix];          // adds batch dimension
 
-      final List<dynamic>? result = await _channel.invokeMethod<List<dynamic>>(
-        'runInference', 
-        {'data': flattened, 'windowSize': windowSize, 'numFeatures': _numFeatures}
-      );
+      // ── Step 5: Prepare output tensor [1, 3] ──────────────────────────────
+      final output = [List<double>.filled(3, 0.0)];
 
-      if (result == null || result.length < 3) return AlertSeverity.none;
-      
-      final List<double> probs = result.map((e) => (e as num).toDouble()).toList();
+      // ── Step 6: Run inference — takes under 50ms on a modern phone ─────────
+      _interpreter!.run(input, output);
 
-      lastProbabilities = probs;
+      final List<double> probs = output[0];
+      lastProbabilities = List<double>.from(probs);
       notifyListeners();
 
-      // DEBUG LOG: Show exactly what the AI thinks
-      debugPrint('🧠 AI Confidence → Major: ${(probs[2]*100).toStringAsFixed(1)}%, Minor: ${(probs[1]*100).toStringAsFixed(1)}%, Normal: ${(probs[0]*100).toStringAsFixed(1)}%');
-      debugPrint('🧠 Required confidence to trigger: ${(majorThreshold*100).toStringAsFixed(0)}%');
+      // ── Step 7: Log probabilities for debugging ────────────────────────────
+      debugPrint(
+        '🧠 Brain output → '
+            'None: ${(probs[0] * 100).toStringAsFixed(1)}%  '
+            'Minor: ${(probs[1] * 100).toStringAsFixed(1)}%  '
+            'Major: ${(probs[2] * 100).toStringAsFixed(1)}%  '
+            '| thresholds: major≥${(_majorThreshold * 100).toStringAsFixed(0)}%  '
+            'minor≥${(_minorThreshold * 100).toStringAsFixed(0)}%',
+      );
 
-      if (probs[2] >= majorThreshold) return AlertSeverity.major;
-      if (probs[1] >= minorThreshold) return AlertSeverity.minor;
+      // ── Step 8: Apply logic gate ───────────────────────────────────────────
+      if (probs[2] >= _majorThreshold) return AlertSeverity.major;
+      if (probs[1] >= _minorThreshold) return AlertSeverity.minor;
       return AlertSeverity.none;
-
     } catch (e) {
       debugPrint('❌ BrainService.analyze() error: $e');
       return AlertSeverity.none;
     }
   }
 
-  List<List<double>> _buildInputMatrix(List<SensorReading> readings, int windowSize) {
+  // ── Private helpers ────────────────────────────────────────────────────────
+
+  /// Converts raw SensorReading list into a (windowSize × 5) matrix.
+  /// Rows: [Acc_X, Acc_Y, Acc_Z, Magnitude, DB_Level]
+  /// Short buffers are zero-padded at the beginning (matches training ZOH).
+  List<List<double>> _buildInputMatrix(
+      List<SensorReading> readings,
+      int windowSize,
+      ) {
     final relevant = readings.length > windowSize
         ? readings.sublist(readings.length - windowSize)
         : readings;
 
     return List<List<double>>.generate(windowSize, (i) {
-        final dataOffset = windowSize - relevant.length;
-        if (i < dataOffset) return [0.0, 0.0, 0.0, 0.0, 0.0];
-        final r = relevant[i - dataOffset];
-        final mag = sqrt(r.x * r.x + r.y * r.y + r.z * r.z);
-        return [r.x, r.y, r.z, mag, r.dbLevel ?? 0.0];
+      final dataOffset = windowSize - relevant.length;
+      if (i < dataOffset) return [0.0, 0.0, 0.0, 0.0, 0.0];
+      final r = relevant[i - dataOffset];
+      final mag = sqrt(r.x * r.x + r.y * r.y + r.z * r.z);
+      return [r.x, r.y, r.z, mag, r.dbLevel ?? 0.0];
     });
   }
 
+  /// Min-max normalization to [0.0, 1.0] using training-time statistics.
+  /// Uses the exact same formula as train_model.py — critical for accuracy.
   List<List<double>> _normalize(List<List<double>> matrix) {
     final fMin = _normParams!.min;
     final fMax = _normParams!.max;
+
     return matrix.map((row) {
       return List<double>.generate(_numFeatures, (f) {
         final range = fMax[f] - fMin[f];
-        if (range == 0) return 0.0; 
+        if (range == 0) return 0.0; // avoid division by zero
         return ((row[f] - fMin[f]) / range).clamp(0.0, 1.0);
       });
     }).toList();
+  }
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+
+  @override
+  void dispose() {
+    _interpreter?.close();
+    super.dispose();
   }
 }

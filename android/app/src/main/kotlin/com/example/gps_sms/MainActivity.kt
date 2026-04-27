@@ -8,25 +8,26 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.res.AssetManager
 import android.os.Build
 import android.telephony.SmsManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import org.tensorflow.lite.Interpreter
-import java.io.FileInputStream
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
+
+// ── REMOVED: These imports are no longer needed ──────────────────────────────
+// import org.tensorflow.lite.Interpreter   ← removed, BrainService handles TFLite in Dart
+// import java.io.FileInputStream            ← removed
+// import java.nio.MappedByteBuffer          ← removed
+// import java.nio.channels.FileChannel      ← removed
+// ─────────────────────────────────────────────────────────────────────────────
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.gps_sms/hardware_buttons"
-    private val BRAIN_CHANNEL = "com.example.gps_sms/brain"
+    // BRAIN_CHANNEL removed — BrainService.dart handles TFLite directly
     private var methodChannel: MethodChannel? = null
-    
-    // TFLite Brain Members
-    private var tfliteInterpreter: Interpreter? = null
-    
+
+    // tfliteInterpreter removed — no longer needed here
+
     private var lastPowerClickTime: Long = 0
     private var powerClickCount = 0
 
@@ -68,59 +69,28 @@ class MainActivity: FlutterActivity() {
                 volumeClickCount = 1
             }
             lastVolumeClickTime = currentTime
-            return true 
+            return true
         }
         return super.onKeyDown(keyCode, event)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        
+
         createNotificationChannel()
 
+        // Hardware button channel — unchanged
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-        
-        // Brain Channel implementation
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BRAIN_CHANNEL).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "loadModel" -> {
-                    try {
-                        tfliteInterpreter = Interpreter(loadModelFile())
-                        result.success(true)
-                    } catch (e: Exception) {
-                        result.error("LOAD_ERROR", e.message, null)
-                    }
-                }
-                "runInference" -> {
-                    val data = call.argument<List<Double>>("data")
-                    val windowSize = call.argument<Int>("windowSize") ?: 0
-                    val numFeatures = call.argument<Int>("numFeatures") ?: 0
-                    
-                    if (data != null && tfliteInterpreter != null) {
-                        // Reshape input to [1, windowSize, numFeatures] as Float
-                        val input = Array(1) { Array(windowSize) { FloatArray(numFeatures) } }
-                        for (i in 0 until windowSize) {
-                            for (j in 0 until numFeatures) {
-                                input[0][i][j] = data[i * numFeatures + j].toFloat()
-                            }
-                        }
-                        
-                        // Output shape [1, 3]
-                        val output = Array(1) { FloatArray(3) }
-                        tfliteInterpreter?.run(input, output)
-                        
-                        // Convert to List for Flutter
-                        val resultList = output[0].map { it.toDouble() }
-                        result.success(resultList)
-                    } else {
-                        result.error("DATA_ERROR", "Invalid data or model not loaded", null)
-                    }
-                }
-                else -> result.notImplemented()
-            }
-        }
 
-        val smsChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.gps_sms/background_sms")
+        // BRAIN_CHANNEL block removed entirely.
+        // TFLite inference is now handled by tflite_flutter in brain_service.dart.
+        // No native Kotlin code is needed for the AI model.
+
+        // SMS channel — unchanged
+        val smsChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.example.gps_sms/background_sms"
+        )
         smsChannel.setMethodCallHandler { call, result ->
             if (call.method == "sendSms") {
                 val phone = call.argument<String>("phone")
@@ -139,7 +109,7 @@ class MainActivity: FlutterActivity() {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
         }
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(screenReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
@@ -147,26 +117,21 @@ class MainActivity: FlutterActivity() {
         }
     }
 
-    private fun loadModelFile(): MappedByteBuffer {
-        val fileDescriptor = assets.openFd("flutter_assets/assets/ml/model.tflite")
-        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-        val fileChannel = inputStream.channel
-        val startOffset = fileDescriptor.startOffset
-        val declaredLength = fileDescriptor.length
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-    }
+    // loadModelFile() removed — no longer needed
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val name = "Emergency Alerts"
-            val descriptionText = "High priority notifications for nearby emergencies"
-            val importance = NotificationManager.IMPORTANCE_HIGH
-            val channel = NotificationChannel("emergency_alerts_channel", name, importance).apply {
-                description = descriptionText
+            val channel = NotificationChannel(
+                "emergency_alerts_channel",
+                name,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "High priority notifications for nearby emergencies"
                 enableVibration(true)
-                setVibrationPattern(longArrayOf(0, 500, 300, 500))
+                vibrationPattern = longArrayOf(0, 500, 300, 500)
             }
-            val notificationManager: NotificationManager =
+            val notificationManager =
                 getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
         }
@@ -182,22 +147,21 @@ class MainActivity: FlutterActivity() {
             }
 
             val SENT = "SMS_SENT"
-            val sentPI = PendingIntent.getBroadcast(this, 0, Intent(SENT), PendingIntent.FLAG_IMMUTABLE)
+            val flags =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            val sentPI = PendingIntent.getBroadcast(this, 0, Intent(SENT), flags)
 
             val sentReceiver = object : BroadcastReceiver() {
                 override fun onReceive(arg0: Context?, arg1: Intent?) {
-                    when (resultCode) {
-                        Activity.RESULT_OK -> {
-                            try { result.success("Sent") } catch (e: Exception) {}
-                        }
-                        else -> {
-                            try { result.error("FAILED", "SMS Delivery Failed", null) } catch (e: Exception) {}
-                        }
+                    if (resultCode == Activity.RESULT_OK) {
+                        try { result.success("Sent") } catch (e: Exception) {}
+                    } else {
+                        try { result.error("FAILED", "SMS Delivery Failed", null) } catch (e: Exception) {}
                     }
-                    unregisterReceiver(this)
+                    try { unregisterReceiver(this) } catch (e: Exception) {}
                 }
             }
-            
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(sentReceiver, IntentFilter(SENT), Context.RECEIVER_EXPORTED)
             } else {
@@ -218,8 +182,6 @@ class MainActivity: FlutterActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            unregisterReceiver(screenReceiver)
-        } catch (e: Exception) {}
+        try { unregisterReceiver(screenReceiver) } catch (e: Exception) {}
     }
 }
